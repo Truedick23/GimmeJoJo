@@ -3,8 +3,22 @@ from pymongo import MongoClient
 from random import choice, uniform
 from bs4 import BeautifulSoup
 import time
+import ssl
 import os
+import base64
 import traceback
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+import urllib
+import urllib.request as req
+from requests.auth import HTTPProxyAuth
+from urllib3.util.ssl_ import create_urllib3_context
+
+CIPHERS = (
+    'ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+HIGH:'
+    'DH+HIGH:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+HIGH:RSA+3DES:!aNULL:'
+    '!eNULL:!MD5'
+)
 
 myHeaders = ["Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowser; .NET CLR 1.1.4322; .NET CLR 2.0.50727)",
              "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0; Acoo Browser; SLCC1; .NET CLR 2.0.50727; Media Center PC 5.0; .NET CLR 3.0.04506)",
@@ -24,17 +38,68 @@ myHeaders = ["Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowse
              "Opera/9.80 (Macintosh; Intel Mac OS X 10.6.8; U; fr) Presto/2.9.168 Version/11.52"]
 
 params = {'User-Agent': choice(myHeaders)}
+hdr = {'Accept-Language':'zh-TW,zh;q=0.8,en-US;q=0.6,en;q=0.4', 'Cache-Control':'max-age=0', 'Connection':'keep-alive', 'Proxy-Connection':'keep-alive', #'Cache-Control':'no-cache', 'Connection':'close',
+        'User-Agent':'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36',
+        'Accept-Encoding':'gzip,deflate,sdch','Accept':'*/*'}
+
+class DESAdapter(HTTPAdapter):
+    """
+    A TransportAdapter that re-enables 3DES support in Requests.
+    """
+    def create_ssl_context(self):
+        #ctx = create_urllib3_context(ciphers=FORCED_CIPHERS)
+        ctx = ssl.create_default_context()
+        # allow TLS 1.0 and TLS 1.2 and later (disable SSLv3 and SSLv2)
+        ctx.options |= ssl.OP_NO_SSLv2
+        ctx.options |= ssl.OP_NO_SSLv3
+        ctx.options |= ssl.OP_NO_TLSv1
+        ctx.options |= ssl.OP_NO_TLSv1_2
+        ctx.options |= ssl.OP_NO_TLSv1_1
+        #ctx.options |= ssl.OP_NO_TLSv1_3
+        ctx.set_ciphers( CIPHERS )
+        ctx.set_alpn_protocols(['http/1.1', 'spdy/2'])
+        return ctx
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context(ciphers=CIPHERS)
+        kwargs['ssl_context'] = self.create_ssl_context()
+        return super(DESAdapter, self).init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        context = create_urllib3_context(ciphers=CIPHERS)
+        kwargs['ssl_context'] = self.create_ssl_context()
+        return super(DESAdapter, self).proxy_manager_for(*args, **kwargs)
 
 def get_jojo_collection(name):
     client = MongoClient()
     return client.jojo[name]
 
+def get_proxy():
+    proxyHost = '119.3.37.101'
+    proxyPort = '54238'
+
+    proxyUser = "dingzhx@vip.qq.com"
+    proxyPass = "josephlive199823"
+
+    proxyMeta = "http://%(user)s:%(pass)s@%(host)s:%(port)s" % {
+      "host" : proxyHost,
+      "port" : proxyPort,
+      "user" : proxyUser,
+      "pass" : proxyPass,
+    }
+
+    proxies = {
+        "http"  : proxyMeta,
+        "https" : proxyMeta
+    }
+
+    return proxies
+
 def get_html_text(url):
-    global attributeErrorNum, httpErrorNum
+    # proxy = get_proxy()
+    headers = {'User-Agent': 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'}
     try:
-        proxy = {'https:': '127.0.0.1:1080', 'http:': '127.0.0.1:1080'}
-        r = requests.get(url, proxies=proxy)
-        r.headers = params
+        r = requests.get(url, headers=headers)
         r.encoding = 'utf-8'
         status = r.status_code
         if status == 404:
@@ -72,7 +137,7 @@ def get_manga_pic_pages(root_url, total_pages, name):
                 'pic_url': pic_url,
                 'downloaded': False
             })
-            time.sleep(uniform(0.1, 0.3))
+            time.sleep(uniform(0.1, 0.2))
             print(name + ' Progress: {:.2%}'.format(collection.count() / total_pages), end='\n')
     print(name + ' already in stock!')
 
@@ -85,12 +150,20 @@ def get_em_pics(name, root_dir):
         pic_url = item['pic_url']
         page = item['page']
         path = root_dir + '/' + name + '/' + str(page).zfill(3) + '.jpg'
-        download_pic(pic_url, path)
-        time.sleep(uniform(0, 0.1))
-        collection.update(
-            {'pic_url': item['pic_url']},
-            {'$set': {'downloaded': True}}
-        )
+        try:
+            status = download_pic(pic_url, path)
+            if status == 200:
+                # time.sleep(uniform(0.3, 0.6))
+                collection.update(
+                    {'pic_url': item['pic_url']},
+                    {'$set': {'downloaded': True}}
+                )
+            else:
+                print(status)
+        except:
+            print(traceback.format_exc())
+            print(page)
+            print(item['page_url'])
         total_num = collection.count()
         downloaded_num = collection.count({'downloaded': True})
         print(name + ' Progress: {:.2%}'.format(downloaded_num / total_num), end='\n')
@@ -98,9 +171,36 @@ def get_em_pics(name, root_dir):
     cursor.close()
 
 def download_pic(url, path):
-    html = requests.get(url, params=params)
-    with open(path, 'wb') as file:
-        file.write(html.content)
+    appKey = "NzMwTmVFV25FM2t3Q3pyMTpyY2FodURsek1DaXpRRVJq"
+    ip_port = 'transfer.moguproxy.com:9001'
+
+    proxy = {"http": "http://" + ip_port, "https": "https://" + ip_port}
+    headers_with_proxy = {"Proxy-Authorization": 'Basic ' + appKey, 'User-Agent': 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'}
+    headers = {'User-Agent': 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'}
+    '''
+    proxy = req.ProxyHandler({'https': address, 'http': address})
+    auth = req.HTTPBasicAuthHandler()
+    opener = req.build_opener(proxy, auth, req.HTTPHandler)
+    user_agent = 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'
+    opener.addheaders = [('User-Agent', choice(myHeaders))]
+    req.install_opener(opener)
+    conn = req.urlopen(url)
+    '''
+
+    proxies = get_proxy()
+    ses = requests.session()
+    ses.trust_env = False
+    ses.mount(url , DESAdapter())
+    user = '730NeEWnE3kwCzr1'
+    password = 'rcahuDlzMCizQERj'
+    # response = requests.get(url, timeout=10, verify=False, allow_redirects=False)
+    auth = HTTPProxyAuth(user, password)
+    response = requests.get(url, headers=headers)
+    # esponse = requests.get(url , headers=headers_with_proxy, proxies=proxy, verify=False, allow_redirects=False)
+    if response.status_code == 200:
+        with open(path, 'wb') as file:
+            file.write(response.content)
+    return response.status_code
 
 def season1_bundle():
     get_manga_pic_pages('https://www.manhuadb.com/manhua/116/3_7824.html', 191, 's1b1')
@@ -227,15 +327,93 @@ def season7_bundle():
     get_manga_pic_pages('https://www.manhuadb.com/manhua/147/4_300.html', 179, 's7b24')
     print('Season 7 finished!')
 
-def download_ignite():
+def gimme_tomorrow_joe():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2927.html', 381, 'j1')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2926.html', 395, 'j2')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2924.html', 391, 'j3')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2920.html', 379, 'j4')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2928.html', 383, 'j5')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2929.html', 389, 'j6')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2930.html', 393, 'j7')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2922.html', 387, 'j8')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2923.html', 387, 'j9')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2925.html', 383, 'j10')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2931.html', 377, 'j11')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/257/239_2921.html', 383, 'j12')
+
+def gimme_eva():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6686.html', 178, 'eva1')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6691.html', 181, 'eva2')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6681.html', 173, 'eva3')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6678.html', 185, 'eva4')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6689.html', 189, 'eva5')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6679.html', 185, 'eva6')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6690.html', 188, 'eva7')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6688.html', 181, 'eva8')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6687.html', 181, 'eva9')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6685.html', 179, 'eva10')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6684.html', 173, 'eva11')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6683.html', 181, 'eva12')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6680.html', 184, 'eva13')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/598/613_6682.html', 204, 'eva14')
+
+def gimme_astro():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5296.html', 217, 'ast01')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5283.html', 210, 'ast02')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5282.html', 215, 'ast03')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5291.html', 234, 'ast04')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5298.html', 236, 'ast05')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5284.html', 228, 'ast06')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5294.html', 241, 'ast07')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5290.html', 225, 'ast08')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5292.html', 206, 'ast09')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5287.html', 214, 'ast10')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5286.html', 204, 'ast11')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5293.html', 214, 'ast12')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5281.html', 186, 'ast13')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5289.html', 218, 'ast14')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5297.html', 202, 'ast15')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5285.html', 215, 'ast16')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5288.html', 216, 'ast17')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/486/493_5295.html', 235, 'ast18')
+
+def gimme_uzumaki():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/584/588_6467.html', 209, 'u1')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/584/588_6466.html', 201, 'u2')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/584/588_6465.html', 257, 'u3')
+
+def gimme_gyo():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/591/592_6475.html', 199, 'gyo1')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/591/592_6474.html', 204, 'gyo2')
+
+def gimme_shiguri():
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/648/672_7258.html', 201, 'sh1')
+    get_manga_pic_pages('https://www.manhuadb.com/manhua/648/672_7250.html', 190, 'sh2')
+
+def jojo_download_ignite():
     orders = [1, 6, 12, 29, 48, 64]
     for s in range(5):
         for b in range(orders[s], orders[s+1]):
             get_em_pics('s' + str(s+1) + 'b' + str(b), 'E:/JoJoManga/')
+    for i in range(17):
+        get_em_pics('s6b' + str(i+1), 'E:/JoJoManga/')
+    for i in range(24):
+        get_em_pics('s7b' + str(i+1), 'E:/JoJoManga/')
+
+def astro_download_ignite():
+    for i in range(18):
+        get_em_pics('ast' + str(i+1).zfill(2), 'E:/Astro/')
 
 if __name__ == '__main__':
-    # season7_bundle()
-
-    download_ignite()
+    '''
+    proxies = get_proxy()
+    targetUrl = "http://test.abuyun.com"
+    resp = requests.get(targetUrl, proxies=proxies)
+    print(resp.status_code)
+    '''
+    # gimme_tomorrow_joe()
+    # gimme_astro()
+    #jojo_download_ignite()
+    astro_download_ignite()
 
 
